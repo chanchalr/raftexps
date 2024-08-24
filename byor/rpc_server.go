@@ -107,8 +107,11 @@ func (s *RPCServer) Call(id int, serviceMethod string, args interface{}, reply i
 func (s *RPCServer) DisconnectAll() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	log.Printf("clients for disconnect all %+v", s.peerClients)
 	for _, client := range s.peerClients {
-		client.Close()
+		if client != nil {
+			client.Close()
+		}
 	}
 	s.peerClients = make(map[int]*rpc.Client)
 }
