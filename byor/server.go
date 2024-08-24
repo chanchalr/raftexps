@@ -11,4 +11,5 @@ type Server interface {
 	ConnectToPeer(peerId int, addr net.Addr) error
 	DisconnectPeer(peerId int) error
 	Report() (id int, term int, isLeader bool)
+	Submit(cmd interface{}) bool
 }

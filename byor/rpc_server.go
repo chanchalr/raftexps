@@ -18,6 +18,7 @@ type RPCServer struct {
 	rpcProxy    *RPCProxy
 	rpcServer   *rpc.Server
 	listner     net.Listener
+	commitChan  chan<- CommitEntry
 	peerClients map[int]*rpc.Client
 	ready       <-chan interface{}
 	quit        chan interface{}
@@ -29,19 +30,20 @@ type RPCProxy struct {
 	cm ConsensusModule
 }
 
-func NewRPCServer(serverId int, peerIds []int, ready <-chan interface{}) *RPCServer {
+func NewRPCServer(serverId int, peerIds []int, ready <-chan interface{}, commitChan chan<- CommitEntry) *RPCServer {
 	s := new(RPCServer)
 	s.serverId = serverId
 	s.peerIds = peerIds
 	s.peerClients = make(map[int]*rpc.Client)
 	s.ready = ready
 	s.quit = make(chan interface{})
+	s.commitChan = commitChan
 	return s
 }
 
 func (s *RPCServer) Serve() {
 	s.mu.Lock()
-	s.cm = NewGPConsensusModule(s.serverId, s.peerIds, s)
+	s.cm = NewGPConsensusModule(s.serverId, s.peerIds, s, s.commitChan)
 	s.cm.Start(s.ready)
 	s.rpcServer = rpc.NewServer()
 	s.rpcProxy = &RPCProxy{cm: s.cm}
@@ -78,6 +80,9 @@ func (s *RPCServer) Serve() {
 
 }
 
+func (s *RPCServer) Submit(cmd interface{}) bool {
+	return s.cm.Submit(cmd)
+}
 func (s *RPCServer) Shutdown() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

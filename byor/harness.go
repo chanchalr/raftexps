@@ -2,6 +2,7 @@ package byor
 
 import (
 	"log"
+	"sync"
 	"testing"
 	"time"
 )
@@ -11,16 +12,21 @@ func init() {
 }
 
 type Harness struct {
-	cluster   []Server
-	connected []bool
-	n         int
-	t         *testing.T
+	mu          sync.Mutex
+	cluster     []Server
+	connected   []bool
+	n           int
+	t           *testing.T
+	commitChans []chan CommitEntry
+	commits     [][]CommitEntry
 }
 
 func NewHarness(t *testing.T, n int) *Harness {
 	ns := make([]Server, n)
 	connected := make([]bool, n)
 	ready := make(chan interface{})
+	commitChans := make([]chan CommitEntry, n)
+	commits := make([][]CommitEntry, n)
 	for i := 0; i < n; i++ {
 		peerIds := make([]int, 0)
 		for p := 0; p < n; p++ {
@@ -28,7 +34,8 @@ func NewHarness(t *testing.T, n int) *Harness {
 				peerIds = append(peerIds, p)
 			}
 		}
-		ns[i] = NewRPCServer(i, peerIds, ready)
+		commitChans[i] = make(chan CommitEntry)
+		ns[i] = NewRPCServer(i, peerIds, ready, commitChans[i])
 		ns[i].Serve()
 	}
 	for i := 0; i < n; i++ {
@@ -41,12 +48,103 @@ func NewHarness(t *testing.T, n int) *Harness {
 	}
 	//close(ready)
 	ready <- "sample"
-	return &Harness{
-		cluster:   ns,
-		connected: connected,
-		n:         n,
-		t:         t,
+	h := &Harness{
+		cluster:     ns,
+		connected:   connected,
+		n:           n,
+		t:           t,
+		commitChans: commitChans,
+		commits:     commits,
 	}
+	for i := 0; i < n; i++ {
+		go h.collectCommits(i)
+	}
+	return h
+}
+
+func (h *Harness) collectCommits(i int) {
+	for c := range h.commitChans[i] {
+		h.mu.Lock()
+		tlog("collectCommits(%d) got +%v", i, c)
+		h.commits[i] = append(h.commits[i], c)
+		h.mu.Unlock()
+	}
+}
+
+func (h *Harness) CheckCommitted(cmd int) (nc int, index int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	commitsLen := -1
+	for i := 0; i < h.n; i++ {
+		if h.connected[i] {
+			if commitsLen >= 0 {
+				if len(h.commits[i]) != commitsLen {
+					h.t.Fatalf("commits[%d] = %v, want %v", i, len(h.commits[i]), commitsLen)
+				}
+			} else {
+				commitsLen = len(h.commits[i])
+			}
+		}
+	}
+	for c := 0; c < commitsLen; c++ {
+		cmdAtC := -1
+		for i := 0; i < h.n; i++ {
+			if h.connected[i] {
+				tlog("peerID:%d, and commitIndex: %d, commands h.commits[i]:%+v,commandAtC:%v", i, c, h.commits[i], cmdAtC)
+				cmdOfN := h.commits[i][c].Command.(int)
+				if cmdAtC >= 0 {
+					if cmdOfN != cmdAtC {
+						h.t.Errorf("got %d, want %d at h.commits[%d][%d]", cmdOfN, cmdAtC, i, c)
+					}
+				} else {
+					cmdAtC = cmdOfN
+				}
+			}
+		}
+		if cmdAtC == cmd {
+			index := -1
+			nc := 0
+			for i := 0; i < h.n; i++ {
+				if h.connected[i] {
+					if index >= 0 && h.commits[i][c].Index != index {
+						h.t.Errorf("got Index=%d want %d at h.commits[%d][%d]", h.commits[i][c].Index, index, i, c)
+					} else {
+						index = h.commits[i][c].Index
+					}
+					nc++
+				}
+			}
+			return nc, index
+		}
+	}
+	h.t.Errorf("cmd=%d not found in commits", cmd)
+	return -1, -1
+}
+
+func (h *Harness) CheckCommittedN(cmd int, n int) {
+	nc, _ := h.CheckCommitted(cmd)
+	if nc != n {
+		h.t.Errorf("CheckCommmittedN got nc=%d want %d", nc, n)
+	}
+}
+
+func (h *Harness) CheckNotCommitted(cmd int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := 0; i < h.n; i++ {
+		if h.connected[i] {
+			for c := 0; c < len(h.commits[i]); c++ {
+				gotCmd := h.commits[i][c].Command.(int)
+				if gotCmd == cmd {
+					h.t.Errorf("Found %d at commits [%d][%d], expected none", cmd, i, c)
+				}
+			}
+		}
+	}
+}
+
+func (h *Harness) SubmitToServer(serverId int, cmd interface{}) bool {
+	return h.cluster[serverId].Submit(cmd)
 }
 
 func (h *Harness) Shutdown() {
